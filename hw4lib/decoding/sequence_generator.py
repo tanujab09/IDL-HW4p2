@@ -235,17 +235,30 @@ class SequenceGenerator:
             if finished.all():
                 break
 
-            flat_sequences = sequences.reshape(batch_size * beam_width, -1)
-            next_scores = self.score_fn(flat_sequences).reshape(batch_size, beam_width, -1)
-            next_scores = self._apply_repeat_penalty(next_scores, sequences, repeat_penalty)
-            next_scores = next_scores / temperature
-            log_probs = torch.log_softmax(next_scores, dim=-1)
+            beam_log_probs = []
+            for beam_idx in range(beam_width):
+                beam_sequences = sequences[:, beam_idx, :]
+                beam_scores = self.score_fn(beam_sequences)
+                beam_scores = self._apply_repeat_penalty(
+                    beam_scores,
+                    beam_sequences,
+                    repeat_penalty
+                )
+                beam_scores = beam_scores / temperature
+                beam_log_prob = torch.log_softmax(beam_scores, dim=-1)
 
-            if finished.any():
-                eos_mask = torch.full_like(log_probs, float('-inf'))
-                eos_mask[..., self.tokenizer.eos_id] = 0.0
-                log_probs = torch.where(finished.unsqueeze(-1), eos_mask, log_probs)
+                if finished[:, beam_idx].any():
+                    eos_only = torch.full_like(beam_log_prob, float('-inf'))
+                    eos_only[..., self.tokenizer.eos_id] = 0.0
+                    beam_log_prob = torch.where(
+                        finished[:, beam_idx].unsqueeze(-1),
+                        eos_only,
+                        beam_log_prob
+                    )
 
+                beam_log_probs.append(beam_log_prob)
+
+            log_probs = torch.stack(beam_log_probs, dim=1)
             candidate_scores = scores.unsqueeze(-1) + log_probs
             flat_candidate_scores = candidate_scores.reshape(batch_size, -1)
             scores, top_indices = torch.topk(flat_candidate_scores, k=beam_width, dim=-1)
